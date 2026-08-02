@@ -1,216 +1,130 @@
-# Image Optimizer API
+# Image Optimizer API (Stateless v1.0)
 
-Uma API HTTP de alta performance para otimização extrema de imagens PNG, desenvolvida em Node.js usando Express e a biblioteca Sharp. Perfeita para integração com n8n (otimizando imagens geradas pelo Browserless antes do envio via WhatsApp), automações ou microsserviços.
-
----
-
-## Como a Decisão de Otimização é Tomada
-
-A API possui um motor de **Otimização Inteligente e Extensível**. O fluxo de execução de uma requisição segue o diagrama abaixo:
-
-```text
-Imagem Recebida (Multipart ou Octet-Stream)
-↓
-Leitura de Metadados via Sharp (Resolução, Formato e Paleta)
-↓
-Seleção de Estratégias Válidas (Otimização Opcional)
-  ├─ Se a imagem original já for paletizada (metadata.palette === true):
-  │  └─ Executa APENAS a estratégia "palette=true" (evita reconversão para RGB e overhead de CPU)
-  └─ Caso contrário (JPEG, WebP, etc.):
-     └─ Executa TODAS as estratégias ativas concorrentemente
-↓
-Processamento em Paralelo (Promise.all)
-  ├─ Estratégia A: sem paletização (palette=false)
-  └─ Estratégia B: com paletização (palette=true)
-↓
-Comparação de Resultados
-  ├─ Coleta o tamanho (bytes) dos buffers resultantes
-  └─ Seleciona o vencedor inicial (menor tamanho em bytes)
-↓
-Retorno do PNG Otimizado
-  ├─ Adiciona cabeçalhos personalizados (X-Original-Size, X-Optimized-Size, etc.)
-  └─ Envia buffer binário (image/png)
-```
-
-### Qualidade Visual vs. Tamanho de Arquivo
-
-A biblioteca Sharp nativa não calcula métricas de distorção de imagem (como SSIM ou PSNR) sem dependências adicionais compiladas no sistema operacional. Por essa razão, por padrão, o algoritmo de otimização seleciona a imagem com o menor tamanho de arquivo. 
-
-No entanto, a arquitetura deste projeto foi projetada para ser **extensível**. O código de ordenação das estratégias permite plugar facilmente uma função analisadora de qualidade visual no futuro, sem qualquer alteração na interface da API pública.
+Uma API HTTP stateless de alta performance para processamento e otimização de imagens em memória utilizando a biblioteca Sharp e Express. A aplicação opera de maneira totalmente efêmera: recebe a imagem, processa as otimizações requisitadas e devolve diretamente o binário otimizado, sem persistir nada em disco e sem gerar arquivos locais.
 
 ---
 
-## Detalhes de Otimização PNG
+## Funcionalidades e Regras de Negócio (v1.0)
 
-Para imagens PNG, o parâmetro `quality` da URL é mantido apenas por compatibilidade com APIs legadas (embora ele guie a quantização interna quando `palette=true`). A compressão real e redução de tamanho dependem dos seguintes fatores que configuramos no Sharp:
+Esta versão foi desenvolvida com foco em estabilidade de produção, processamento determinístico, alta performance (baixo consumo de CPU/memória) e preservação visual rigorosa de textos, preços e logotipos.
 
-1. **`compressionLevel` (0-9)**: Ajustado no nível máximo `9` para obter a melhor taxa de compressão zlib.
-2. **`palette: true` (Quantização)**: Reduz a imagem a uma paleta indexada de até 256 cores (semelhante ao `pngquant`), reduzindo drasticamente o tamanho (até 80%) enquanto preserva a transparência (canal alfa) e a nitidez.
-3. **`effort` (1-10)**: Definido no valor máximo `10` (esforço total de CPU) para encontrar a melhor combinação possível de filtros e compressão de linha.
-4. **`adaptiveFiltering: true`**: Habilita a filtragem adaptativa de linha para reduzir padrões repetitivos antes da compressão zlib.
-5. **Remoção de Metadados**: Discarda automaticamente tags EXIF/XMP/IPTC não críticas da imagem original para economizar bytes preciosos.
+### 1. Formatos Suportados (`format`)
+- `png` (padrão se nenhum formato for informado)
+- `jpeg` (ou `jpg`)
+- `webp`
 
-A API **nunca** altera a largura, altura, resolução ou proporção da imagem original.
+### 2. Presets Prontos
+Qualquer parâmetro explícito enviado na requisição sobrescreve a configuração correspondente do preset.
+- **`whatsapp`**: `format=jpeg`, `width=1080`, `quality=78`, `fit=inside`, `stripMetadata=true` (Gera arquivos normalmente entre 120 KB e 180 KB sem perda perceptível de qualidade).
+- **`telegram`**: `format=jpeg`, `width=1280`, `quality=82`, `fit=inside`, `stripMetadata=true` (Gera arquivos normalmente entre 150 KB e 250 KB priorizando excelente qualidade visual).
+- **`thumbnail`**: `format=png`, `width=200`, `height=200`, `fit=cover`, `stripMetadata=true` (Formato PNG com corte central e metadados removidos).
 
----
-
-## Tecnologias Utilizadas
-
-- **Node.js 22**
-- **Express.js** (Servidor HTTP rápido e leve)
-- **Sharp** (Processamento de imagem ultrarrápido baseado na libvips)
-- **Multer** (Tratamento de uploads de arquivos multipart)
-
----
-
-## Rotas da API
-
-### `GET /health`
-Verifica a integridade e tempo de atividade da aplicação.
-- **Resposta (JSON):**
-  ```json
-  {
-    "success": true,
-    "status": "ok",
-    "version": "1.0.0",
-    "uptime": 124,
-    "node": "v22.5.0"
-  }
-  ```
-
-### `GET /info`
-Retorna dados de versão do microsserviço e das principais dependências.
-- **Resposta (JSON):**
-  ```json
-  {
-    "service": "image-optimizer",
-    "version": "1.0.0",
-    "node": "v22.5.0",
-    "sharp": "0.33.5"
-  }
-  ```
-
-### `POST /optimize`
-Recebe e otimiza a imagem, retornando o binário PNG diretamente.
-
-#### Parâmetros de Query String (Opcionais):
-- `quality` (1 a 100): Padrão `90`.
-- `compressionLevel` (0 a 9): Padrão `9`.
-- `palette` (`true` ou `false`): Padrão de comportamento inteligente (roda as duas e compara se omitido, ou força o modo se especificado).
-
-#### Cabeçalhos de Resposta:
-- `X-Original-Size`: Tamanho original da imagem em bytes.
-- `X-Optimized-Size`: Tamanho otimizado da imagem em bytes.
-- `X-Reduction-Percent`: Percentual de redução de tamanho (ex: `75.4%`).
-- `X-Processing-Time`: Tempo total de processamento em ms (ex: `54ms`).
-- `X-Optimization-Mode`: A estratégia que venceu e foi retornada (ex: `palette=true`).
+### 3. Proteções de Otimização
+- **Sem Ampliação (`withoutEnlargement`)**: Imagens com dimensões menores do que a resolução do preset ou parâmetros enviados **nunca** serão esticadas ou ampliadas. Elas mantêm suas dimensões originais.
+- **Comparação de Tamanho**: Se a imagem otimizada resultar em um arquivo maior em bytes do que a imagem original recebida, a API retornará automaticamente o buffer original (exceto se houver uma conversão explícita de formato solicitada pelo usuário).
+- **Qualidade Mínima por Formato**:
+  - `jpeg`: qualidade mínima de `55`
+  - `webp`: qualidade mínima de `60`
+  - `png`: sem limite artificial (usa compressão nativa baseada no Sharp)
 
 ---
 
-## Instalação e Execução Local
+## Como o Algoritmo `targetSizeKB` Funciona
+
+O algoritmo de aproximação do `targetSizeKB` opera em memória de maneira iterativa e de alta performance:
+
+1. **Verificação Preliminar**: Processa a imagem na escala original (1.0) e qualidade inicial. Se o tamanho final já for menor ou igual ao `targetSizeKB` solicitado, o processamento é interrompido e a imagem é retornada **imediatamente**.
+2. **Degradação Sequencial Controlada**:
+   - **Qualidade Primeiro**: Reduz a qualidade da compressão de 5 em 5 unidades em até 4 passos (ex: `quality - 5`, `quality - 10`, `quality - 15`, `quality - 20`), respeitando os limites mínimos de cada formato para evitar que textos e logotipos fiquem ilegíveis.
+   - **Resolução depois (Último Recurso)**: Se a imagem ainda estiver acima do peso alvo após a redução de qualidade, a API diminui a escala de resolução gradualmente (`90%`, `80%`, `70%`), nunca reduzindo a escala abaixo de `70%`.
+3. **Deduplicação de Passos**: Passos repetidos (por limitação de qualidade mínima) são pulados automaticamente para poupar processamento.
+4. **Escolha da Melhor Imagem**: Todos os buffers gerados são coletados e comparados. A API seleciona e retorna o buffer com o tamanho **mais próximo** do alvo em bytes (diferença absoluta mínima), seja ligeiramente acima ou abaixo.
+
+---
+
+## Executando Localmente
 
 ### Pré-requisitos
 - Node.js v22 ou superior instalado.
 
 ### Passos
-1. Clone este repositório.
-2. Acesse a pasta do projeto:
-   ```bash
-   cd image-optimizer
-   ```
-3. Instale as dependências:
+1. Instale as dependências:
    ```bash
    npm install
    ```
-4. Inicie o servidor em ambiente de desenvolvimento (com recarregamento automático):
+2. Inicialize o servidor em modo de desenvolvimento (com recarregamento automático):
    ```bash
    npm run dev
    ```
-5. Para executar em produção:
-   ```bash
-   npm start
-   ```
 
-O servidor estará disponível em `http://localhost:3000`.
+O servidor estará escutando na porta `3000` (`http://localhost:3000`).
 
 ---
 
-## Executando via Docker
+## Exemplos de Requisição e Resposta
 
-Para rodar de forma isolada em produção utilizando Docker:
-
-1. Construa a imagem:
-   ```bash
-   docker build -t image-optimizer .
-   ```
-2. Inicie o container mapeando a porta 3000:
-   ```bash
-   docker run -d -p 3000:3000 --name image-optimizer-app image-optimizer
-   ```
-
----
-
-## Deploy no Easypanel
-
-Este projeto está pronto para deploy imediato no **Easypanel** (plataforma de hospedagem baseada em Docker).
-
-1. No painel do seu Easypanel, crie um novo **Serviço de Aplicação (App)**.
-2. Na aba **Source**, aponte para o repositório Git correspondente a este projeto.
-3. Certifique-se de que a porta exposta nas configurações do Easypanel é a **3000**.
-4. O Easypanel detectará automaticamente o `Dockerfile` contido na raiz do projeto e construirá a imagem baseada em `node:22-alpine` sem necessidade de configurações adicionais.
-
----
-
-## Exemplos de Uso (cURL)
-
-### Exemplo 1: Enviando via `multipart/form-data` (Upload de Arquivo)
+### 1. Upload via Multipart Form (`multipart/form-data`)
 ```bash
-curl -X POST "http://localhost:3000/optimize?quality=85" \
-  -F "image=@imagem_teste.jpg" \
-  --output imagem_otimizada.png
+curl -X POST "http://localhost:3000/optimize?preset=whatsapp" \
+  -F "image=@imagem_teste.png" \
+  --output imagem_whatsapp.jpg
 ```
 
-### Exemplo 2: Enviando via `application/octet-stream` (Binário Direto no Corpo)
+**Cabeçalhos de Resposta Esperados:**
+- `Content-Type`: `image/jpeg`
+- `X-Original-Size`: `1852031` (bytes)
+- `X-Optimized-Size`: `142512` (bytes)
+- `X-Reduction-Percent`: `92.3%`
+- `X-Processing-Time`: `82ms`
+- `X-Optimization-Mode`: `preset=whatsapp;quality=78`
+
+---
+
+### 2. Upload via Corpo Binário (`application/octet-stream`)
 ```bash
-curl -X POST "http://localhost:3000/optimize?quality=80" \
+curl -X POST "http://localhost:3000/optimize?format=webp&quality=80&targetSizeKB=150" \
   -H "Content-Type: application/octet-stream" \
-  --data-binary "@imagem_teste.jpg" \
-  --output imagem_otimizada.png
+  --data-binary "@imagem_teste.png" \
+  --output imagem_otimizada.webp
 ```
 
 ---
 
-## Integração com o n8n
+### 3. Requisição via JSON (`application/json`) com Saída JSON
+```bash
+curl -X POST "http://localhost:3000/optimize?json=true" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "preset": "thumbnail"}'
+```
 
-O nó **HTTP Request** do n8n pode enviar a imagem vinda de nós anteriores (como o Browserless) de forma extremamente fácil.
+**Resposta (JSON):**
+```json
+{
+  "success": true,
+  "image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "format": "png",
+  "originalSize": 85,
+  "optimizedSize": 85,
+  "reductionPercent": "0.0%",
+  "processingTimeMs": 12,
+  "optimizationMode": "preset=thumbnail;quality=80;returned_original_smaller"
+}
+```
 
-### Configuração com `application/octet-stream` (Recomendado)
+---
 
-Esta abordagem envia o arquivo de forma direta e limpa.
+## Configuração no n8n
 
-1. Adicione o nó **HTTP Request** ao seu fluxo.
-2. Configure os parâmetros:
+O nó **HTTP Request** do n8n pode consumir esta API de forma stateless:
+
+1. Adicione o nó **HTTP Request**.
+2. Configure os parâmetros principais:
    - **Method**: `POST`
-   - **URL**: `http://<IP_DO_SEU_EASYPANEL>:3000/optimize`
-   - **Authentication**: (Opcional, conforme configurado)
-   - **Send Body**: Marcar como `true`
+   - **URL**: `http://<IP_DO_MICROSERVICO>:3000/optimize?preset=whatsapp`
+   - **Send Body**: `true`
    - **Body Content Type**: `n8n Binary File`
-   - **Input Data Field Name**: O nome do seu campo binário do n8n (comum: `data`)
-3. Nas opções de cabeçalhos do nó HTTP Request:
-   - Defina `Content-Type` como `application/octet-stream`.
-4. Em **Response Format**, marque como **File** para receber o PNG otimizado e enviá-lo diretamente nas próximas etapas (ex: WhatsApp).
-
-### Configuração com `multipart/form-data`
-
-Caso o webhook recebedor precise obrigatoriamente de um formato de upload tradicional:
-
-1. No nó **HTTP Request**:
-   - **Method**: `POST`
-   - **URL**: `http://<IP_DO_SEU_EASYPANEL>:3000/optimize`
-   - **Send Body**: Marcar como `true`
-   - **Body Content Type**: `Multipart-Form-Data`
-2. Em **Specify Body**, defina um parâmetro com:
-   - **Name**: `image`
-   - **Parameter Type**: `Form Data Binary`
-   - **Input Data Field Name**: O nome do seu campo binário no n8n (normalmente `data`).
-3. Configure o formato de resposta como **File**.
+   - **Input Data Field Name**: O nome do seu campo binário (ex: `data` ou `image`)
+3. Adicione no cabeçalho (Headers) do nó HTTP Request:
+   - `Content-Type`: `application/octet-stream`
+4. Em **Response Format**, selecione **File**.
